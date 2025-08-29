@@ -1,0 +1,251 @@
+import logging, sqlite3, time
+from telegram import (
+    Update, ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardButton, InlineKeyboardMarkup
+)
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters,
+    ContextTypes, CallbackQueryHandler
+)
+
+# ==========================
+# CONFIG
+# ==========================
+TOKEN = "TON_TOKEN_ICI"  # ⚠️ Mets ton vrai token BotFather
+ADMIN_CHAT_ID = 123456789  # ⚠️ Mets ton chat ID admin
+REQUIRED_CHANNELS = ["@flashboost01", "@flashboost1"]  # à remplir ou []
+
+# Support
+SUPPORT_TG = "@boosts_services"
+SUPPORT_WA = "https://wa.me/2290194619220"
+GROUP_LINK = "https://t.me/+ahdUG00vfS04Njg0"
+WITHDRAW_CHANNEL_LINK = "https://t.me/flashboost01"
+DONATE_LINK = "https://t.me/flashboost1"
+
+# Récompenses parrainage
+REF_REWARD = 10
+REF_MIN_USE = 100
+
+# Tarifs
+PRICING = {
+    "TikTok": {"Abonnés": 2000, "Likes": 800, "Vues": 500},
+    "Facebook": {"Abonnés": 2500, "Likes": 800, "Vues": 700},
+    "Instagram": {"Abonnés": 3500, "Likes": 1200, "Vues": 700},
+    "Telegram": {"Abonnés": 2500, "Likes": 500, "Vues": 500},
+    "WhatsApp": {"Abonnés": 4500},
+    "YouTube": {"Abonnés": 3000, "Likes": 1000, "Vues": 800},
+}
+
+# ==========================
+# DB
+# ==========================
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cur = conn.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS users(
+    user_id INTEGER PRIMARY KEY,
+    referrer INTEGER,
+    ref_likes INTEGER DEFAULT 0,
+    referrals INTEGER DEFAULT 0
+)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS orders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    platform TEXT,
+    service TEXT,
+    quantity INTEGER,
+    target TEXT,
+    price INTEGER,
+    status TEXT,
+    ts REAL
+)""")
+conn.commit()
+
+# ==========================
+# UTILS
+# ==========================
+def main_menu():
+    rows = [
+        [KeyboardButton("🌀 Mon Solde 💰"), KeyboardButton("🌀 Parrainage👥👥")],
+        [KeyboardButton("🌀 Retrait 💰"), KeyboardButton("📞 Écrire au support 📞")],
+        [KeyboardButton("🌀 Groupe de Discussion"), KeyboardButton("🌀 Canal de retrait🌑")],
+        [KeyboardButton("✅ Nous soutenir"), KeyboardButton("🌀 Procédure📄")],
+        [KeyboardButton("🛒 Achat 🛍️"), KeyboardButton("❓ Pourquoi gagnez-vous de l'argent ?")],
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+def join_channels_keyboard():
+    rows = [[InlineKeyboardButton(f"Rejoindre {ch}", url=f"https://t.me/{ch.strip('@')}")] for ch in REQUIRED_CHANNELS]
+    rows.append([InlineKeyboardButton("✅ J’ai rejoint", callback_data="check_sub")])
+    return InlineKeyboardMarkup(rows)
+
+async def ensure_user(update: Update):
+    uid = update.effective_user.id
+    cur.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (uid,))
+    conn.commit()
+    return uid
+
+async def is_member(app, user_id):
+    if not REQUIRED_CHANNELS:
+        return True
+    for ch in REQUIRED_CHANNELS:
+        try:
+            m = await app.get_chat_member(ch, user_id)
+            if m.status in ("left", "kicked"):
+                return False
+        except:
+            return False
+    return True
+
+# ==========================
+# COMMANDES
+# ==========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = await ensure_user(update)
+    ref = context.args[0] if context.args else ""
+    if ref.startswith("ref_"):
+        rid = int(ref.split("_")[1])
+        if rid != uid:
+            cur.execute("UPDATE users SET referrals=referrals+1, ref_likes=ref_likes+? WHERE user_id=?",
+                        (REF_REWARD, rid))
+            conn.commit()
+            await context.bot.send_message(rid, f"🎉 Nouveau filleul ! +{REF_REWARD} likes.")
+    if not await is_member(context.application, uid):
+        await update.message.reply_text("⚠️ Tu dois d’abord rejoindre nos canaux :", reply_markup=join_channels_keyboard())
+    else:
+        await update.message.reply_text("👋 Bienvenue !", reply_markup=main_menu())
+
+async def achat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton(p, callback_data=f"plat_{p}")] for p in PRICING]
+    await update.message.reply_text("Choisis une plateforme :", reply_markup=InlineKeyboardMarkup(kb))
+
+async def tarifs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = "📦 *Grille tarifaire* (1K):\n\n"
+    for plat, srv in PRICING.items():
+        txt += f"📌 *{plat}*\n"
+        for s, prix in srv.items():
+            txt += f"- {s} : {prix} F\n"
+        txt += "\n"
+    await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
+async def historique(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur.execute("SELECT platform,service,quantity,price,status FROM orders WHERE user_id=? ORDER BY ts DESC LIMIT 10",(uid,))
+    rows = cur.fetchall()
+    if not rows:
+        await update.message.reply_text("Aucune commande.")
+    else:
+        txt = "🧾 *Historique commandes*:\n\n"
+        for p,s,q,pr,st in rows:
+            txt += f"{q} {s} {p} → {pr}F [{st}]\n"
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
+async def parrainage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur.execute("SELECT referrals,ref_likes FROM users WHERE user_id=?",(uid,))
+    r,l = cur.fetchone() or (0,0)
+    link = f"https://t.me/{context.bot.username}?start=ref_{uid}"
+    txt = f"👥 Parrainage:\n- Filleuls: {r}\n- Likes: {l}\n- Lien: {link}"
+    kb = [[InlineKeyboardButton("🎁 Utiliser mes likes", callback_data="use_ref")]]
+    await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+
+async def solde(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur.execute("SELECT ref_likes FROM users WHERE user_id=?",(uid,))
+    likes = (cur.fetchone() or (0,))[0]
+    await update.message.reply_text(f"🎁 Solde parrainage : {likes} likes")
+
+async def retrait(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur.execute("SELECT ref_likes FROM users WHERE user_id=?",(uid,))
+    likes = (cur.fetchone() or (0,))[0]
+    if likes < REF_MIN_USE:
+        await update.message.reply_text(f"📦 Retrait indisponible. Solde actuel: {likes} likes (min {REF_MIN_USE})")
+    else:
+        await update.message.reply_text(f"✅ Tu as {likes} likes. Clique pour utiliser.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Utiliser mes likes",callback_data="use_ref")]]))
+
+async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"☎️ Support:\nTelegram: {SUPPORT_TG}\nWhatsApp: {SUPPORT_WA}")
+
+async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❓ FAQ / Procédure\n1. Choisis /achat\n2. Paye\n3. Attends validation")
+
+async def moncompte(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(price),0) FROM orders WHERE user_id=?",(uid,))
+    n,tot = cur.fetchone()
+    cur.execute("SELECT referrals,ref_likes FROM users WHERE user_id=?",(uid,))
+    r,l = cur.fetchone() or (0,0)
+    txt = f"👤 Mon compte:\n- Commandes: {n}\n- Dépensé: {tot}F\n- Filleuls: {r}\n- Likes: {l}"
+    await update.message.reply_text(txt)
+
+# ==========================
+# ROUTER TEXT MENU
+# ==========================
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = await ensure_user(update)
+    if not await is_member(context.application, uid):
+        await update.message.reply_text("⚠️ Rejoins nos canaux :", reply_markup=join_channels_keyboard())
+        return
+    txt = update.message.text.lower()
+
+    if "achat" in txt:
+        await achat(update, context)
+    elif "historique" in txt:
+        await historique(update, context)
+    elif "parrainage" in txt:
+        await parrainage(update, context)
+    elif "solde" in txt:
+        await solde(update, context)
+    elif "retrait" in txt:
+        await retrait(update, context)
+    elif "support" in txt:
+        await support(update, context)
+    elif "procédure" in txt or "faq" in txt:
+        await faq(update, context)
+    elif "tarifs" in txt:
+        await tarifs(update, context)
+    elif "mon compte" in txt:
+        await moncompte(update, context)
+    elif "groupe" in txt:
+        await update.message.reply_text("👥 "+GROUP_LINK)
+    elif "canal" in txt:
+        await update.message.reply_text("🌑 "+WITHDRAW_CHANNEL_LINK)
+    elif "soutenir" in txt:
+        await update.message.reply_text("✅ "+DONATE_LINK)
+    else:
+        await update.message.reply_text("Choisis une option :", reply_markup=main_menu())
+
+# ==========================
+# CALLBACKS INLINE
+# ==========================
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    await q.answer()
+    if data=="use_ref":
+        uid = q.from_user.id
+        cur.execute("SELECT ref_likes FROM users WHERE user_id=?",(uid,))
+        l=(cur.fetchone() or (0,))[0]
+        if l<REF_MIN_USE:
+            await q.edit_message_text(f"Pas assez de likes ({l}/{REF_MIN_USE})")
+        else:
+            cur.execute("UPDATE users SET ref_likes=ref_likes-? WHERE user_id=?",(REF_MIN_USE,uid))
+            conn.commit()
+            await q.edit_message_text("🎁 Likes utilisés avec succès !")
+    elif data.startswith("plat_"):
+        plat = data[5:]
+        kb=[[InlineKeyboardButton(f"{s} - {p}F",callback_data=f"srv_{plat}_{s}")] for s,p in PRICING[plat].items()]
+        await q.edit_message_text(f"Services {plat}:", reply_markup=InlineKeyboardMarkup(kb))
+    elif data.startswith("srv_"):
+        _,plat,srv=data.split("_",2)
+        kb=[[InlineKeyboardButton("1K",callback_data=f"ord_{plat}_{srv}_1000")],
+            [InlineKeyboardButton("5K",callback_data=f"ord_{plat}_{srv}_5000")]]
+        await q.edit_message_text(f"{srv} sur {plat}: Choisis quantité", reply_markup=InlineKeyboardMarkup(kb))
+    elif data.startswith("ord_"):
+        _,plat,srv,qte=data.split("_")
+        price = (int(qte)//1000)*PRICING[plat][srv]
+        uid = q.from_user.id
+        cur.execute("INSERT INTO orders(user_id,platform,service,quantity,target,price,status,ts) VALUES(?,?,?,?,?,?,?,?)",
+                    (uid,plat,srv,int(qte),"",price,"En attente",time.time()))
